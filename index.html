@@ -413,7 +413,7 @@ document.addEventListener('click',()=>document.querySelectorAll('.ms.open').forE
     <div class="ms" id="d-f-pai"></div>
   </div>
   <div class="dpane" id="dp-overview">
-    <div class="dfilter hidden" id="ov-filterbar"><span class="eg-lbl" style="margin:0">Year</span><div class="ms" id="ov-f-year" title="Filter every KPI, chart and table on this tab"></div></div>
+    <div class="dfilter hidden" id="ov-filterbar"><span class="eg-lbl" style="margin:0">CPO</span><div class="ms" id="ov-f-cpo" title="Show one or more CPOs on every KPI, chart and table on this tab"></div><span class="eg-lbl" style="margin:0 0 0 8px">Year</span><div class="ms" id="ov-f-year" title="Filter every KPI, chart and table on this tab"></div></div>
     <div class="kpi-strip">
       <div class="kpi bl"><div class="kpi-lbl">Chargers on board (EVSE)</div><div class="kpi-val teal" id="ov-evse">—</div><div class="kpi-sub" id="ov-evse-sub">unique EVSE serials</div></div>
       <div class="kpi"><div class="kpi-lbl">AC chargers</div><div class="kpi-val ac" id="ov-ac">—</div><div class="kpi-sub" id="ov-ac-sub">&nbsp;</div></div>
@@ -2758,6 +2758,7 @@ function egRenderDup(){
   box.innerHTML='<div class="err-item w"><div class="ei w">!</div><div style="flex:1">'+body+'</div></div>';
 }
 var ovYear=[];   // [] = all years
+var ovCpo=[];    // [] = all CPOs
 function egRenderOverview(){
   const $=id=>document.getElementById(id),has=egVisible().length>0;
   $('ov-empty').classList.toggle('hidden',has);
@@ -2769,14 +2770,17 @@ function egRenderOverview(){
     ['ov-evse','ov-ac','ov-dc','ov-reg','ov-cred','ov-kwh','ov-kwh-ac','ov-kwh-dc'].forEach(id=>$(id).textContent='—');
     $('ov-evse-sub').textContent='unique EVSE serials';$('ov-cred-sub').textContent='tCO₂e · all saved submissions';
     ['ov-ac-sub','ov-dc-sub','ov-reg-sub','ov-kwh-ac-sub','ov-kwh-dc-sub'].forEach(id=>$(id).innerHTML='&nbsp;');
-    $('ov-filterbar').classList.add('hidden');ovYear=[];
+    $('ov-filterbar').classList.add('hidden');ovYear=[];ovCpo=[];
     return;}
-  const allYrs=egUniq(egVisible().map(r=>String(r.year))).sort(),fy=$('ov-f-year');
+  const allCpos=egUniq(egVisible().map(r=>r.cpo)).sort();
+  ovCpo=ovCpo.filter(c=>allCpos.includes(c));
+  msRender('ov-f-cpo',allCpos,ovCpo,'All CPOs','CPOs',v=>{ovCpo=v.slice();egRenderOverview();});
+  const allYrs=egUniq(egVisible().filter(r=>msIn(ovCpo,r.cpo)).map(r=>String(r.year))).sort(),fy=$('ov-f-year');
   ovYear=ovYear.filter(y=>allYrs.includes(y));
   msRender('ov-f-year',allYrs,ovYear,'All years','years',v=>{ovYear=v.slice();egRenderOverview();});
   $('ov-filterbar').classList.toggle('hidden',currentRole!=='saxon');
-  if(currentRole!=='saxon')ovYear=[];
-  const ovRecs=egVisible().filter(r=>msIn(ovYear,String(r.year)));
+  if(currentRole!=='saxon'){ovYear=[];ovCpo=[];}
+  const ovRecs=egVisible().filter(r=>msIn(ovCpo,r.cpo)&&msIn(ovYear,String(r.year)));
   const items=egItems(ovRecs),a=egAgg(items);
   const regs=egGroup(items,it=>egRowRegion(it.row)),cpos=egUniq(ovRecs.map(r=>r.cpo)).sort();
   const pct=(x,t)=>t?egFmt(x/t*100,1)+'% of total':'—';
@@ -2853,6 +2857,7 @@ function egRecEditForm(r){
 }
 function egSaveRec(id){
   const r=egRecords.find(x=>x.id===id);if(!r)return;
+  if(r._fromXl){alert('This submission was loaded from the output workbook only. Re-run it in Upload data to edit it.');return;}
   const g=k=>document.getElementById('er-'+k+'-'+id).value.trim();
   const cpo=g('cpo'),pai=g('pai'),per=g('per'),yr=parseInt(g('yr'),10);
   if(!cpo||!pai){alert('CPO and PAI cannot be blank.');return;}
@@ -3482,6 +3487,7 @@ async function spSyncRecords(){
       await gBatch((old._rowIds||[]).map(rid=>({method:'DELETE',url:spItemsUrl('EVSE_Results')+'/'+rid})));
       await spDelete('Submissions',id);dirty.add(old._xlCpo||old.cpo);delete spKnown[id];}}
   for(const r of egRecords){
+    if(r._fromXl)continue;
     if(r._sp&&r._sig===spRecSig(r))continue;
     dirty.add(r.cpo);if(r._xlCpo&&r._xlCpo!==r.cpo)dirty.add(r._xlCpo);r._xlCpo=r.cpo;
     const rowsChanged=!r._sp||r._rowsRev!==r.rev||r._rowsKey!==egRecKey(r);
@@ -3581,6 +3587,52 @@ async function spWriteOutput(cpos){
 }
 // Excel may return dates as serial numbers; normalise to YYYY-MM-DD for matching
 function spXlDate(v){if(typeof v==='number'&&v>20000&&v<80000){const d=new Date(Math.round((v-25569)*864e5));return d.toISOString().slice(0,10);}return String(v==null?'':v).trim();}
+
+// ══ LOAD FROM THE SAVED OUTPUT WORKBOOK (Evolve Dashboard library) ══
+// Builds dashboard records from EVolve_Dashboard_Output_ByCPO.xlsx (one sheet per CPO, one row per EVSE per period).
+// Merged with the lists: a submission found in the lists wins (it carries Sections A/B detail); one found only in
+// the workbook is still shown. Workbook-only records are read-only and are never written back to the lists.
+async function spLoadWorkbookRecs(){
+  const tok=await authGraphToken();
+  const r=await fetch(G+'/drives/'+SP.drive+'/root:/'+spEnc(SP_CFG.outputFile)+':/content',{headers:{Authorization:'Bearer '+tok}});
+  if(r.status===404)return [];
+  if(!r.ok)throw new Error('Could not read '+SP_CFG.outputFile+' (HTTP '+r.status+')');
+  const wb=XLSX.read(new Uint8Array(await r.arrayBuffer()),{type:'array'});
+  const groups={};
+  wb.SheetNames.forEach(sn=>{
+    const aoa=XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,defval:'',raw:true});
+    if(aoa.length<2)return;
+    const H=aoa[0].map(v=>String(v).trim()),ix=n=>H.indexOf(n);
+    if(ix('EVSE (Serial)')<0||ix('CPO')<0)return;            // not a data sheet (e.g. Column Guide)
+    const g=(v,n)=>{const i=ix(n);return i<0?'':v[i];};
+    aoa.slice(1).forEach(v=>{
+      const evse=String(g(v,'EVSE (Serial)')||'').trim(),cpo=String(g(v,'CPO')||'').trim();
+      if(!evse||!cpo)return;
+      const st=spXlDate(g(v,'Period start')),en=spXlDate(g(v,'Period end'));
+      const yr=String(g(v,'Year')||st.slice(0,4)),pai=String(g(v,'PAI reference')||'').trim();
+      const key=[cpo,pai,yr,st,en].join('|');
+      const run=String(g(v,'Calc run ID')||''),rev=+((run.match(/rev(\d+)/)||[])[1])||1;
+      const G0=groups[key]=groups[key]||{cpo,pai,year:yr,start:st,end:en,rev,dy:+g(v,'D_y')||1,run,rows:[]};
+      const acdc=String(g(v,'AC/DC Basis')||'').toUpperCase()==='DC'?'DC':'AC',num=n=>+g(v,n)||0;
+      const reg=String(g(v,'Region')||'');
+      G0.rows.push({site:String(g(v,'Charging Station')||''),evse,country:String(g(v,'Country')||''),state:reg,gridName:reg,region:reg,
+        type:acdc,acdc,dc:acdc==='DC',fleet:'',sessions:num('Sessions'),ed:num('Total kWh (ED)'),ec:0,
+        be:num('BE (tCO2e)'),pe:num('PE (tCO2e)'),er:num('Credits (tCO2e)'),flagged:false,flagReason:'',
+        kw:g(v,'Charger Output (kW)')||'',cod:spXlDate(g(v,'COD Date'))});
+    });
+  });
+  const fmtD=v=>v?new Date(v+'T00:00:00').toLocaleDateString(undefined,{day:'numeric',month:'short',year:'numeric'}):'—';
+  return Object.values(groups).map((x,k)=>{
+    const sm=f=>x.rows.reduce((t,r)=>t+r[f],0),at=Date.parse(((x.run.match(/\d{4}-\d{2}-\d{2}/)||[])[0]||'')+'T12:00:00')||Date.now();
+    return {id:900000+k,_fromXl:true,rev:x.rev,history:[],savedAt:at,
+      savedText:new Date(at).toLocaleDateString(undefined,{day:'numeric',month:'short',year:'numeric'})+' (from workbook)',
+      cpo:x.cpo,pai:x.pai,year:x.year,start:x.start,end:x.end,periodText:fmtD(x.start)+' – '+fmtD(x.end),
+      A:{regionMode:egUniq(x.rows.map(r=>r.gridName).filter(Boolean)).join(' + '),erc:0,erf:0,le:0,dy:x.dy,grids:[]},
+      B:{fleet:{name:'',cat:'—',vehicle:'',system:'',afec:'',fuels:[]}},
+      C:{inv:[],tx:[],counted:sm('sessions'),outOfPeriod:0,notInInv:0,unpaid:0,rejected:0,dupes:0,noTime:0,flaggedRegion:0},
+      rows:x.rows.sort((a,b)=>b.er-a.er),ery:sm('er'),ed:sm('ed'),be:sm('be'),pe:sm('pe'),capKwh:0,recent:[],issues:[],issueCount:0,docs:[],docFolderUrl:''};
+  });
+}
 // ══ ORIGINAL FILES → document library ══
 // Calc docs: Evolve Dashboard library → Raw Data/{CPO}/{PAI}/{year}/{start}_{end}/rev{n}/NN__{Inventory|Transactions}__{file}
 const spSafe=s=>String(s||'').replace(/["*:<>?\/\\|#%]/g,'_').trim()||'_';
@@ -3709,9 +3761,12 @@ async function spStart(){
   spGate('Loading from SharePoint…');
   try{
     await spInit();
-    const [recs,ver]=await Promise.all([spLoadRecords(),spLoadVerra(),spLoadRef()]);
+    const [listRecs,ver,,xlRecs]=await Promise.all([spLoadRecords(),spLoadVerra(),spLoadRef(),
+      spLoadWorkbookRecs().catch(e=>{console.warn('Output workbook not read:',e);return [];})]);
+    const have=new Set(listRecs.map(egRecKey));
+    const recs=listRecs.concat(xlRecs.filter(r=>!have.has(egRecKey(r))));
     await spLoadDocMeta(recs);
-    egRecords=recs;egRecSeq=recs.reduce((m,r)=>Math.max(m,r.id),0);spKnown={};recs.forEach(r=>spKnown[r._sp]=r);egSaved=recs.length>0;
+    egRecords=recs;egRecSeq=Math.max(listRecs.reduce((m,r)=>Math.max(m,r.id),0),900000+xlRecs.length);spKnown={};listRecs.forEach(r=>spKnown[r._sp]=r);egSaved=recs.length>0;
     vSubs=ver.subs;vSeq=vSubs.reduce((m,x)=>Math.max(m,x.id),0);
     if(ver.steps.length){tlItems=ver.steps;tlSeq=tlItems.reduce((m,x)=>Math.max(m,x.id),0);tlUpd=ver.tlUpd;}
     document.getElementById('sp-gate').remove();
