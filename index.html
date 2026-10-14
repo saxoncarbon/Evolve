@@ -3568,8 +3568,16 @@ async function spWriteOutput(cpos){
   }
   if(!wb.SheetNames.length)XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([XL_COLS]),'Sheet1');
   const out=XLSX.write(wb,{type:'array',bookType:'xlsx'});
-  try{await spUpload(path,out,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');}
-  catch(e){if(e.status===423)throw new Error('The output workbook is open or locked in Excel. Close it and save again.');throw e;}
+  const XT='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  try{await spUpload(path,out,XT);}
+  catch(e){
+    // Main workbook locked (open in Excel / co-authoring → 423 or "WAC" error): save a timestamped copy instead.
+    if(!(e.status===423||e.status===409||/wac|lock/i.test(e.message||'')))throw e;
+    const d=new Date(),p2=x=>String(x).padStart(2,'0');
+    const alt=path.replace(/\.xlsx$/i,'')+'_'+d.getFullYear()+'-'+p2(d.getMonth()+1)+'-'+p2(d.getDate())+'_'+p2(d.getHours())+p2(d.getMinutes())+'.xlsx';
+    await spUpload(alt,out,XT);
+    setTimeout(()=>alert('The output workbook is open or locked, so this save was written to a copy instead:\n\n'+alt+'\n\nEverything else (lists and original files) saved normally. Close '+path+' everywhere; the next save will update it again.'),0);
+  }
 }
 // Excel may return dates as serial numbers; normalise to YYYY-MM-DD for matching
 function spXlDate(v){if(typeof v==='number'&&v>20000&&v<80000){const d=new Date(Math.round((v-25569)*864e5));return d.toISOString().slice(0,10);}return String(v==null?'':v).trim();}
