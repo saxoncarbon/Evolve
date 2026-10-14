@@ -3597,7 +3597,8 @@ egDocsPut=function(key,arr){
     const path=spDocPath(key);
     for(let i=0;i<arr.length;i++){const f=arr[i];await spUpload(path+'/'+String(i).padStart(2,'0')+'__'+spSafe(f.kind||'File')+'__'+spSafe(f.name),f.buf,f.type);}
     const m=String(key).match(/^(\d+)_r/),r=m&&egRecords.find(x=>x.id===+m[1]);
-    if(r){const fo=await gReq('GET','/drives/'+SP.drive+'/root:/'+spEnc(path)+'?$select=webUrl');r.docFolderUrl=fo.webUrl;await spWriteOutput(await spSyncRecords());}
+    if(r){const fo=await gReq('GET','/drives/'+SP.drive+'/root:/'+spEnc(path)+'?$select=webUrl');r.docFolderUrl=fo.webUrl;const dirty=await spSyncRecords();
+      try{await spWriteOutput(dirty);}catch(e){throw new Error('Files uploaded OK. Output workbook ('+SP_CFG.outputFile+') failed: '+e.message);}}
   });
 };
 egDocsGet=async function(key){
@@ -3727,7 +3728,7 @@ const AUTH_CFG={
 };
 // 2) No app roles: every account that can sign in (your tenant, and the users assigned in Enterprise applications) is Saxon admin.
 // Graph scopes used later for SharePoint (delegated). Sites.Selected needs admin to grant the site.
-const GRAPH_SCOPES=['User.Read','Sites.Selected'];
+const GRAPH_SCOPES=['User.Read','Sites.Selected','Files.ReadWrite.All'];
 
 let msalApp=null,authAccount=null;
 function authDeny(msg){document.getElementById('auth-gate').style.display='flex';document.getElementById('auth-msg').textContent=msg;}
