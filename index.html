@@ -1890,6 +1890,7 @@ function egFindCol(hdr,sub,tests,fallback){
   }
   return fallback;
 }
+function egCodDate(v){if(v==null||v==='')return '';const s=egStamp(v);return s?s.key.slice(0,10):String(v).trim();}
 function egParseInventory(aoa){
   let hr=-1;
   for(let i=0;i<Math.min(aoa.length,25);i++){
@@ -1903,6 +1904,7 @@ function egParseInventory(aoa){
   // Cross-check key: column E (Charging Station) — matched against the transaction EVSE column (col B).
   const iStation=hr>=0?egFindCol(hdr,sub,['chargingstation'],4):4;
   const iKw=hr>=0?egFindCol(hdr,sub,['chargeroutput'],null):null;
+  const iCod=hr>=0?egFindCol(hdr,sub,['commercialoperationdate','commissioningdate','commissiondate','dateofcommissioning','cod'],null):null;
   const out=[];
   for(let i=(hr>=0?hr+1:1);i<aoa.length;i++){
     const r=aoa[i]||[];
@@ -1921,7 +1923,8 @@ function egParseInventory(aoa){
       // AC/DC is read from column O (Charger Type). Only rows column O cannot resolve fall back to a manual selection.
       acdcSrc:egAcdcFromO(r[iType])?'inventory':'',
       acdc:egAcdcFromO(r[iType])||egAcdcMemo[uNorm(serial)]||'',
-      kw:iKw!=null?egNum(r[iKw]):0
+      kw:iKw!=null?egNum(r[iKw]):0,
+      cod:iCod!=null?egCodDate(r[iCod]):''
     });
   }
   return out;
@@ -2264,7 +2267,7 @@ function egRunCore(){
       be+=u.ed*pct*egNum(f.ef)*100/afec/mpg;
     });
     const pe=ec/1000*g.v;
-    return{site:u.site||c.site,evse:c.evse,gridName:g.name,region:g.name+' ('+egFmt(g.v,3)+')'+(g.flagged?' ⚠':''),type:(c.rawType||'(blank)')+' · '+c.acdc,acdc:c.acdc,dc:isDC,country:egCountryName(g.c,g.name),state:egStateName(c.region),fleet:fl.cat+' · '+fl.vehicle,sessions:u.sessions,ed:u.ed,ec,be,pe,er:(be-pe)*Dy,flagged:g.flagged,flagReason:g.reason};
+    return{site:u.site||c.site,evse:c.evse,gridName:g.name,region:g.name+' ('+egFmt(g.v,3)+')'+(g.flagged?' ⚠':''),type:(c.rawType||'(blank)')+' · '+c.acdc,acdc:c.acdc,kw:c.kw||'',cod:c.cod||'',dc:isDC,country:egCountryName(g.c,g.name),state:egStateName(c.region),fleet:fl.cat+' · '+fl.vehicle,sessions:u.sessions,ed:u.ed,ec,be,pe,er:(be-pe)*Dy,flagged:g.flagged,flagReason:g.reason};
   }).sort((a,b)=>b.er-a.er);
 
   rows.forEach(r=>{if(r.flagged)issues.push({t:'w',m:'EVSE "'+r.evse+'" — '+r.flagReason});});
@@ -3359,7 +3362,9 @@ function dataRestore(file){
 const SP_CFG={
   host:'saxonrenewables.sharepoint.com',
   sitePath:'/sites/CarbonProjects',
-  docsRoot:'EVolve Docs',          // top folder created inside the site's default "Documents" library
+  docsLibrary:'Evolve Dashboard',  // document library (URL name: /sites/CarbonProjects/Evolve Dashboard)
+  docsRoot:'Raw Data',             // folder inside that library
+  outputFile:'EVolve_Dashboard_Output_ByCPO.xlsx', // output workbook at the root of the same library (one sheet per CPO)
   calcVersion:'v34'
 };
 const G='https://graph.microsoft.com/v1.0';
@@ -3407,7 +3412,9 @@ async function spInit(){
       const e={name:c.name,type:t,ro:c.readOnly};m[c.displayName]=e;m[c.name]=m[c.name]||e;});
     SP.cols[n]=m;
   }));
-  const d=await gReq('GET','/sites/'+SP.site+'/drive?$select=id');SP.drive=d.id;
+  const ds=await gAll('/sites/'+SP.site+'/drives?$select=id,name,webUrl');
+  const want=SP_CFG.docsLibrary.toLowerCase(),dr=ds.find(x=>(x.name||'').toLowerCase()===want||decodeURIComponent(x.webUrl||'').toLowerCase().endsWith('/'+want));
+  if(!dr)throw new Error('Document library "'+SP_CFG.docsLibrary+'" not found on the site.');SP.drive=dr.id;
 }
 // Display-name fields → internal names, values coerced to the column type.
 function spFields(list,obj){
@@ -3465,16 +3472,18 @@ function spRecFields(r){
 function spRowFields(r,x){
   return {Title:egRecKey(r)+'|'+x.evse,SubmissionKey:egRecKey(r),CPO:r.cpo,PAI:r.pai,MonitoringYear:+r.year,Site:x.site,EVSE_Serial:x.evse,Country:x.country,State:x.state,
     GridName:x.gridName,GridEF:(String(x.region).match(/\(([\d.]+)\)/)||[])[1],ChargerTypeRaw:String(x.type||'').replace(/\s·\s(AC|DC)$/,''),ACDC:x.acdc,Fleet:x.fleet,
-    Sessions:x.sessions,ED_kWh:x.ed,EC_kWh:x.ec,BE_tCO2e:x.be,PE_tCO2e:x.pe,ER_tCO2e:x.er,RegionFlag:x.flagged?'Yes':'No',FlagReason:x.flagReason||''};
+    Sessions:x.sessions,ED_kWh:x.ed,EC_kWh:x.ec,BE_tCO2e:x.be,PE_tCO2e:x.pe,ER_tCO2e:x.er,RegionFlag:x.flagged?'Yes':'No',FlagReason:x.flagReason||'',ChargerKW:x.kw||'',COD:x.cod||''};
 }
 let spKnown={};   // item id → record, for detecting deletions
 async function spSyncRecords(){
+  const dirty=new Set();
   const live=new Set(egRecords.map(r=>r._sp).filter(Boolean));
   for(const id of Object.keys(spKnown)){ if(!live.has(+id)){const old=spKnown[id];
       await gBatch((old._rowIds||[]).map(rid=>({method:'DELETE',url:spItemsUrl('EVSE_Results')+'/'+rid})));
-      await spDelete('Submissions',id);delete spKnown[id];}}
+      await spDelete('Submissions',id);dirty.add(old._xlCpo||old.cpo);delete spKnown[id];}}
   for(const r of egRecords){
     if(r._sp&&r._sig===spRecSig(r))continue;
+    dirty.add(r.cpo);if(r._xlCpo&&r._xlCpo!==r.cpo)dirty.add(r._xlCpo);r._xlCpo=r.cpo;
     const rowsChanged=!r._sp||r._rowsRev!==r.rev||r._rowsKey!==egRecKey(r);
     if(r._sp)await spUpdate('Submissions',r._sp,spRecFields(r));
     else{r._sp=+(await spCreate('Submissions',spRecFields(r)));}
@@ -3485,8 +3494,9 @@ async function spSyncRecords(){
     }
     r._sig=spRecSig(r);spKnown[r._sp]=r;
   }
+  return dirty;
 }
-egPersist=function(){spEnqueue('The submission',spSyncRecords);};
+egPersist=function(){spEnqueue('The submission',async()=>spWriteOutput(await spSyncRecords()));};
 egRestore=function(){};
 async function spLoadRecords(){
   const [subs,rows]=await Promise.all([spItems('Submissions'),spItems('EVSE_Results')]);
@@ -3496,7 +3506,7 @@ async function spLoadRecords(){
     (byKey[key]=byKey[key]||{ids:[],rows:[]}).ids.push(+it.id);
     byKey[key].rows.push({site:g('Site')||'',evse:g('EVSE_Serial')||'',country:g('Country')||'',state:g('State')||'',gridName:g('GridName')||'',
       region:(g('GridName')||'')+(isFinite(ef)?' ('+ef.toFixed(3)+')':'')+(flag?' ⚠':''),type:(g('ChargerTypeRaw')||'(blank)')+' · '+acdc,acdc,dc:acdc==='DC',
-      fleet:g('Fleet')||'',sessions:+g('Sessions')||0,ed:+g('ED_kWh')||0,ec:+g('EC_kWh')||0,be:+g('BE_tCO2e')||0,pe:+g('PE_tCO2e')||0,er:+g('ER_tCO2e')||0,flagged:flag,flagReason:g('FlagReason')||''});});
+      fleet:g('Fleet')||'',sessions:+g('Sessions')||0,ed:+g('ED_kWh')||0,ec:+g('EC_kWh')||0,be:+g('BE_tCO2e')||0,pe:+g('PE_tCO2e')||0,er:+g('ER_tCO2e')||0,flagged:flag,flagReason:g('FlagReason')||'',kw:g('ChargerKW')||'',cod:g('COD')?spYmd(g('COD')):''});});
   const P=s=>{try{return JSON.parse(s||'')}catch(e){return null}};
   const recs=[];
   subs.forEach(it=>{const f=it.fields,g=k=>spGet('Submissions',f,k),key=g('Title')||'';if(!key||/^SAMPLE/.test(key))return;
@@ -3512,14 +3522,58 @@ async function spLoadRecords(){
       C:{inv:[],tx:[],counted:+g('ValidSessions')||0,outOfPeriod:+g('OutOfPeriod')||0,notInInv:+g('NotInInventory')||0,unpaid:+g('Unpaid')||0,rejected:+g('Rejected')||0,dupes:+g('Duplicates')||0,noTime:0,flaggedRegion:+g('RegionFlags')||0},
       rows:R.rows.sort((a,b)=>b.er-a.er),ery:+g('ERy_tCO2e')||0,ed:+g('EDy_kWh')||0,be:+g('BEy_tCO2e')||0,pe:+g('PEy_tCO2e')||0,capKwh:0,recent:[],issues:[],issueCount:+g('IssueCount')||0,
       docs:[],docFolderUrl:g('DocFolderUrl')||'',calcVersion:g('CalcVersion')||'',_rowIds:R.ids};
-    r._rowsRev=r.rev;r._rowsKey=egRecKey(r);r._sig=spRecSig(r);recs.push(r);});
+    r._rowsRev=r.rev;r._rowsKey=egRecKey(r);r._sig=spRecSig(r);r._xlCpo=r.cpo;recs.push(r);});
   return recs;
 }
 
+
+// ══ OUTPUT WORKBOOK: EVolve_Dashboard_Output_ByCPO.xlsx — one sheet per CPO, one row per EVSE per monitoring period ══
+// Each save rewrites the sheet(s) of the CPO(s) that changed, from the saved submissions (the lists are the source).
+// Credit status and COD typed into the workbook by hand are kept across rewrites (matched on PAI + period start + EVSE).
+const XL_COLS=['Year','Period start','Period end','CPO','PAI reference','Country','Region','Charging Station','EVSE (Serial)','Charger Output (kW)','AC/DC Basis','COD Date','Sessions','Total kWh (ED)','Credits (tCO2e)','Credit status','Calc run ID','BE (tCO2e)','PE (tCO2e)','D_y'];
+const xlColL=n=>{let s='';n++;while(n){const m=(n-1)%26;s=String.fromCharCode(65+m)+s;n=(n-m-1)/26;}return s;};
+const XL_LAST=xlColL(XL_COLS.length-1);
+const xlSheetName=c=>String(c||'Unassigned').replace(/[\[\]:*?\/\\]/g,'_').slice(0,31);
+function xlWb(){return '/drives/'+SP.drive+'/root:/'+spEnc(SP_CFG.outputFile)+':/workbook';}
+const xlWs=n=>xlWb()+"/worksheets('"+encodeURIComponent(n.replace(/'/g,"''"))+"')";
+function xlRows(r){
+  const sumEr=r.rows.reduce((t,x)=>t+x.er,0);
+  const tx=(r.docs||[]).filter(d=>d.kind==='Transactions').map(d=>d.name).join('; ');
+  const run=[r.calcVersion||SP_CFG.calcVersion,new Date(r.savedAt).toISOString().slice(0,10),'rev'+r.rev,'SP#'+(r._sp||'')].concat(tx?[tx]:[]).join(' · ');
+  return r.rows.map(x=>{const cred=sumEr?r.ery*x.er/sumEr:r.ery/r.rows.length;
+    return [+r.year,r.start,r.end,r.cpo,r.pai,x.country||'',x.state||x.gridName||'',x.site||'',x.evse,x.kw===''||x.kw==null?'':+x.kw,x.acdc||(x.dc?'DC':'AC'),x.cod||'',
+      x.sessions,+x.ed.toFixed(4),+cred.toFixed(6),'Pending',run,+x.be.toFixed(6),+x.pe.toFixed(6),+(+r.A.dy).toFixed(6)];});
+}
+async function spWriteOutput(cpos){
+  cpos=[...(cpos||[])].filter(Boolean);if(!cpos.length)return;
+  let sheets;
+  try{sheets=(await gReq('GET',xlWb()+'/worksheets?$select=name')).value.map(s=>s.name);}
+  catch(e){if(e.status===404)throw new Error('Output workbook "'+SP_CFG.outputFile+'" was not found at the root of the "'+SP_CFG.docsLibrary+'" library. Upload it there, then save again.');throw e;}
+  for(const cpo of cpos){
+    const name=xlSheetName(cpo);
+    if(!sheets.includes(name)){await gReq('POST',xlWb()+'/worksheets/add',{name});sheets.push(name);}
+    // keep hand-entered Credit status / COD from the current sheet
+    const keep={};
+    const used=await gReq('GET',xlWs(name)+'/usedRange(valuesOnly=true)?$select=address,values');
+    const vals=(used&&used.values)||[];
+    if(vals.length>1){const H=vals[0].map(v=>String(v).trim()),iP=H.indexOf('PAI reference'),iS=H.indexOf('Period start'),iE=H.indexOf('EVSE (Serial)'),iC=H.indexOf('Credit status'),iD=H.indexOf('COD Date');
+      vals.slice(1).forEach(v=>{if(iE<0||!v[iE])return;keep[[v[iP],spXlDate(v[iS]),v[iE]].join('|')]={st:iC>-1?v[iC]:'',cod:iD>-1?spXlDate(v[iD]):''};});}
+    const recs=egRecords.filter(r=>r.cpo===cpo).sort((a,b)=>String(a.year).localeCompare(String(b.year))||String(a.pai).localeCompare(String(b.pai)));
+    const rows=[].concat(...recs.map(xlRows)).map(v=>{const k=keep[[v[4],v[1],v[8]].join('|')];
+      if(k){if(k.st)v[15]=k.st;if(!v[11]&&k.cod)v[11]=k.cod;}return v;});
+    // clear old contents, write header + rows (values only, no formulas)
+    if(used&&used.address){const a=used.address.split('!').pop();await gReq('POST',xlWs(name)+"/range(address='"+a+"')/clear",{applyTo:'Contents'});}
+    await gReq('PATCH',xlWs(name)+"/range(address='A1:"+XL_LAST+"1')",{values:[XL_COLS]});
+    for(let i=0;i<rows.length;i+=1000){const ch=rows.slice(i,i+1000);
+      await gReq('PATCH',xlWs(name)+"/range(address='A"+(i+2)+':'+XL_LAST+(i+1+ch.length)+"')",{values:ch});}
+  }
+}
+// Excel may return dates as serial numbers; normalise to YYYY-MM-DD for matching
+function spXlDate(v){if(typeof v==='number'&&v>20000&&v<80000){const d=new Date(Math.round((v-25569)*864e5));return d.toISOString().slice(0,10);}return String(v==null?'':v).trim();}
 // ══ ORIGINAL FILES → document library ══
-// Calc docs: EVolve Docs/Submissions/{CPO}/{PAI}/{year}/{start}_{end}/rev{n}/NN__{Inventory|Transactions}__{file}
+// Calc docs: Evolve Dashboard library → Raw Data/{CPO}/{PAI}/{year}/{start}_{end}/rev{n}/NN__{Inventory|Transactions}__{file}
 const spSafe=s=>String(s||'').replace(/["*:<>?\/\\|#%]/g,'_').trim()||'_';
-function spRecDocPath(r,rev){return [SP_CFG.docsRoot,'Submissions',r.cpo,r.pai,r.year,r.start+'_'+r.end,'rev'+rev].map(spSafe).join('/');}
+function spRecDocPath(r,rev){return [SP_CFG.docsRoot,r.cpo,r.pai,r.year,r.start+'_'+r.end,'rev'+rev].map(spSafe).join('/');}
 function spDocPath(key){
   let m=String(key).match(/^(\d+)_r(\d+)$/);
   if(m){const r=egRecords.find(x=>x.id===+m[1]);if(r)return spRecDocPath(r,m[2]);}
@@ -3543,7 +3597,7 @@ egDocsPut=function(key,arr){
     const path=spDocPath(key);
     for(let i=0;i<arr.length;i++){const f=arr[i];await spUpload(path+'/'+String(i).padStart(2,'0')+'__'+spSafe(f.kind||'File')+'__'+spSafe(f.name),f.buf,f.type);}
     const m=String(key).match(/^(\d+)_r/),r=m&&egRecords.find(x=>x.id===+m[1]);
-    if(r){const fo=await gReq('GET','/drives/'+SP.drive+'/root:/'+spEnc(path)+'?$select=webUrl');r.docFolderUrl=fo.webUrl;await spSyncRecords();}
+    if(r){const fo=await gReq('GET','/drives/'+SP.drive+'/root:/'+spEnc(path)+'?$select=webUrl');r.docFolderUrl=fo.webUrl;await spWriteOutput(await spSyncRecords());}
   });
 };
 egDocsGet=async function(key){
